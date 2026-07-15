@@ -13,7 +13,7 @@
 #    You should have received a copy of the GNU General Public License
 #    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-VERSION="0.8"
+VERSION="0.9"
 TOKEN=""
 CHATS=()
 DEBUG=false
@@ -62,7 +62,7 @@ function help {
 	echo "    -T <TITLE>       Sets a title for the message. Printed in bold text if -M or -H is used."
 	echo "    -l               Fetch known chat_ids."
 	echo "    -R               Receive a file sent via telegram."
-	echo "    -D               Sets disable_web_page_preview parameter to, well, disable the preview for links to webpages."
+	echo "    -D               Disable the web-page preview for links (via link_preview_options)."
 	echo "                     Can also be set in config as TELEGRAM_DISABLE_WEB_PAGE_PREVIEW=true (see ENVIRONMENT)"
 	echo "                     This feature is only supported for text messages, not when sending files or images (-f, -i)."
 	echo "    -N               Diables notifications on clients. Users will receive a notification with no sound."
@@ -442,6 +442,16 @@ elif [ -n "$VIDEO_FILE" ]; then
 
 	CURL_OPTIONS="$CURL_OPTIONS --form video=@\"$VIDEO_FILE\""
 	CURL_OPTIONS="$CURL_OPTIONS --form caption=<-"
+	CURL_OPTIONS="$CURL_OPTIONS --form-string supports_streaming=true"
+	# Provide width/height/duration when ffprobe is available, so Telegram shows
+	# the correct aspect ratio and a preview without having to probe the upload.
+	if hash ffprobe 2>/dev/null; then
+		vdims=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height:format=duration -of default=nw=1:nk=1 "$VIDEO_FILE" 2>/dev/null | paste -sd' ' -)
+		read -r vw vh vdur _ <<< "$vdims"
+		[[ "$vw"   =~ ^[0-9]+$ ]] && CURL_OPTIONS="$CURL_OPTIONS --form-string width=$vw"
+		[[ "$vh"   =~ ^[0-9]+$ ]] && CURL_OPTIONS="$CURL_OPTIONS --form-string height=$vh"
+		[[ "$vdur" =~ ^[0-9]+   ]] && CURL_OPTIONS="$CURL_OPTIONS --form-string duration=${vdur%%.*}"
+	fi
 	METHOD="sendVideo"
 elif [ -n "$IMAGE_FILE" ]; then
 	check_file "$IMAGE_FILE"
@@ -450,7 +460,7 @@ elif [ -n "$IMAGE_FILE" ]; then
 	METHOD="sendPhoto"
 else
 	CURL_OPTIONS="$CURL_OPTIONS --form text=<-"
-	[ "$DISABLE_WEB_PAGE_PREVIEW" = true ] && CURL_OPTIONS="$CURL_OPTIONS --form-string disable_web_page_preview=true"
+	[ "$DISABLE_WEB_PAGE_PREVIEW" = true ] && CURL_OPTIONS="$CURL_OPTIONS --form-string link_preview_options={\"is_disabled\":true}"
 	METHOD="sendMessage"
 fi
 

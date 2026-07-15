@@ -206,6 +206,13 @@ docker run -it --rm telegram
 
 ## Changelog
 
+### 0.9
+- `sendVideo` now sends `supports_streaming=true` and, when `ffprobe` is
+  available, `width`/`height`/`duration` — for reliable inline playback and a
+  correct preview/aspect ratio.
+- `-D` now uses `link_preview_options` (the current Bot API field) instead of
+  the removed `disable_web_page_preview`.
+
 ### 0.8
 - New `-p` option: deliver to all recipients **in parallel** (independently)
   instead of sequentially, so a slow or unreachable recipient no longer holds
