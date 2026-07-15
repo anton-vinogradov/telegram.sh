@@ -13,7 +13,7 @@
 #    You should have received a copy of the GNU General Public License
 #    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-VERSION="0.7"
+VERSION="0.8"
 TOKEN=""
 CHATS=()
 DEBUG=false
@@ -35,6 +35,7 @@ FILE_URL="https://api.telegram.org/file/bot"
 CURL_OPTIONS="-s"
 RETRIES=1
 RETRY_DELAY=2
+PARALLEL=false
 
 HAS_JQ=false
 hash jq >/dev/null 2>&1 && HAS_JQ=true
@@ -50,6 +51,7 @@ function help {
 	echo "    -a <N>           Attempts per recipient (retries). Recipients are independent. Only transient failures"
 	echo "                     (network errors, HTTP 5xx, 429 rate-limit) are retried; permanent errors fail fast."
 	echo "                     429 'retry_after' is honored. Default: 1 (no retry)."
+	echo "    -p               Deliver to all recipients in parallel (independently) instead of one after another."
 	echo "    -f <FILE>        Sends file."
 	echo "    -i <FILE>        Sends file as image. This will fail if the file isn't an actual image file."
 	echo "    -V <FILE>        Sends file as video."
@@ -215,7 +217,7 @@ function escapeMarkdown {
 	echo "$res"
 }
 
-while getopts "a:t:c:i:f:V:MHCrhlvjnRmDNT:" opt; do
+while getopts "pa:t:c:i:f:V:MHCrhlvjnRmDNT:" opt; do
 	case $opt in
 		t)
 			TOKEN="$OPTARG"
@@ -225,6 +227,9 @@ while getopts "a:t:c:i:f:V:MHCrhlvjnRmDNT:" opt; do
 			;;
 		a)
 			RETRIES="$OPTARG"
+			;;
+		p)
+			PARALLEL=true
 			;;
 		i)
 			IMAGE_FILE="$OPTARG"
@@ -492,11 +497,12 @@ evaluate_response() {
 	fi
 }
 
-FAILED_CHATS=()
-for id in "${CHATS[@]}"; do
+# Deliver the message to a single recipient, with retries.
+#   Arg:    <chat_id>
+#   Return: 0 if delivered, non-zero otherwise. Progress goes to stderr.
+send_to_chat() {
+	local id="$1" MY_CURL_OPTIONS response status attempt=0 delay
 	MY_CURL_OPTIONS="$CURL_OPTIONS --form-string chat_id=$id $URL$TOKEN/$METHOD"
-	attempt=0
-	success=false
 	while [ "$attempt" -lt "$RETRIES" ]; do
 		attempt=$((attempt + 1))
 
@@ -504,8 +510,7 @@ for id in "${CHATS[@]}"; do
 			echo "Executing: curl $MY_CURL_OPTIONS"
 			echo "     Text: $TEXT"
 			echo
-			success=true
-			break
+			return 0
 		fi
 
 		response=$(curl $MY_CURL_OPTIONS <<< "$TEXT")
@@ -513,14 +518,11 @@ for id in "${CHATS[@]}"; do
 		log "Response was: $response"
 		evaluate_response "$status" "$response"
 
-		if [ -z "$SEND_ERROR" ]; then
-			success=true
-			break
-		fi
+		[ -z "$SEND_ERROR" ] && return 0
 
 		if [ "$SEND_RETRYABLE" != true ]; then
 			echo "Chat $id: $SEND_ERROR - permanent, not retrying." >&2
-			break
+			return 1
 		fi
 
 		echo "Chat $id: attempt $attempt of $RETRIES failed. $SEND_ERROR" >&2
@@ -530,12 +532,27 @@ for id in "${CHATS[@]}"; do
 			sleep "$delay"
 		fi
 	done
+	echo "Chat $id: giving up after $attempt attempt(s)." >&2
+	return 1
+}
 
-	if [ "$success" != true ]; then
-		echo "Chat $id: giving up after $attempt attempt(s)." >&2
-		FAILED_CHATS+=("$id")
-	fi
-done
+FAILED_CHATS=()
+if [ "$PARALLEL" = true ] && [ "$DRY_RUN" != true ]; then
+	# Deliver to every recipient concurrently; collect per-chat exit codes.
+	results=$(mktemp -d)
+	for id in "${CHATS[@]}"; do
+		( send_to_chat "$id"; echo "$?" > "$results/$id" ) &
+	done
+	wait
+	for id in "${CHATS[@]}"; do
+		[ "$(cat "$results/$id" 2>/dev/null)" = 0 ] || FAILED_CHATS+=("$id")
+	done
+	rm -rf "$results"
+else
+	for id in "${CHATS[@]}"; do
+		send_to_chat "$id" || FAILED_CHATS+=("$id")
+	done
+fi
 
 if [ ${#FAILED_CHATS[@]} -gt 0 ]; then
 	echo "Failed to deliver to: ${FAILED_CHATS[*]}" >&2

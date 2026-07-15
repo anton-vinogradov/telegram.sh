@@ -80,6 +80,7 @@ telegram [options] [message]
 | `-t <TOKEN>` | Bot token to use (see [Configuration](#configuration)). |
 | `-c <CHAT_ID>` | Recipient chat. **Repeatable** — send to several chats at once. |
 | `-a <N>` | Attempts per recipient (**retries**). Recipients are independent. See [Retries](#retries--exit-code). |
+| `-p` | Deliver to all recipients **in parallel** (independently) instead of sequentially. |
 | `-f <FILE>` | Send a file. |
 | `-i <FILE>` | Send a file as an image (must be a real image). |
 | `-V <FILE>` | Send a file as a video. |
@@ -204,6 +205,11 @@ docker run -it --rm telegram
 ```
 
 ## Changelog
+
+### 0.8
+- New `-p` option: deliver to all recipients **in parallel** (independently)
+  instead of sequentially, so a slow or unreachable recipient no longer holds
+  up the others.
 
 ### 0.7
 - Smarter `-a` retries: only **transient** failures (network/curl errors, HTTP
