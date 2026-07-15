@@ -13,7 +13,7 @@
 #    You should have received a copy of the GNU General Public License
 #    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-VERSION="0.6"
+VERSION="0.7"
 TOKEN=""
 CHATS=()
 DEBUG=false
@@ -47,7 +47,9 @@ function help {
 	echo "OPTIONS are:"
 	echo "    -t <TOKEN>       Telegram bot token to use. See ENVIRONMENT for more information."
 	echo "    -c <CHAT_ID>     Chat to use as recipient. Can be given more than once. See ENVIRONMENT for more information."
-	echo "    -a <N>           Attempts per recipient on failure (retries). Recipients are independent. Default: 1 (no retry)."
+	echo "    -a <N>           Attempts per recipient (retries). Recipients are independent. Only transient failures"
+	echo "                     (network errors, HTTP 5xx, 429 rate-limit) are retried; permanent errors fail fast."
+	echo "                     429 'retry_after' is honored. Default: 1 (no retry)."
 	echo "    -f <FILE>        Sends file."
 	echo "    -i <FILE>        Sends file as image. This will fail if the file isn't an actual image file."
 	echo "    -V <FILE>        Sends file as video."
@@ -451,6 +453,45 @@ fi
 
 [[ "$RETRIES" =~ ^[0-9]+$ ]] && [ "$RETRIES" -ge 1 ] || RETRIES=1
 
+# Classify one send attempt.
+#   Args:  <curl_exit_status> <response_body>
+#   Sets:  SEND_ERROR    - empty on success, else a human-readable reason
+#          SEND_RETRYABLE - "true" only for transient failures worth retrying
+#          RETRY_AFTER   - seconds requested by Telegram on 429 (0 otherwise)
+evaluate_response() {
+	local status="$1" response="$2" ok code desc
+	SEND_ERROR=""; SEND_RETRYABLE=false; RETRY_AFTER=0
+
+	# curl itself failed (network / proxy / timeout) -> always transient.
+	if [ "$status" -ne 0 ]; then
+		SEND_ERROR="curl error (exit $status)"
+		SEND_RETRYABLE=true
+		return
+	fi
+
+	if [ "$HAS_JQ" = true ]; then
+		ok=$(jq -r '.ok' <<< "$response" 2>/dev/null)
+		code=$(jq -r '.error_code // empty' <<< "$response" 2>/dev/null)
+		desc=$(jq -r '.description // empty' <<< "$response" 2>/dev/null)
+		RETRY_AFTER=$(jq -r '.parameters.retry_after // 0' <<< "$response" 2>/dev/null)
+	else
+		[[ "$response" == '{"ok":true'* ]] && ok=true || ok=false
+		code=$(sed -n 's/.*"error_code":[[:space:]]*\([0-9]\{1,\}\).*/\1/p' <<< "$response")
+		desc="$response"
+	fi
+	[[ "$RETRY_AFTER" =~ ^[0-9]+$ ]] || RETRY_AFTER=0
+
+	[ "$ok" = true ] && return   # success
+
+	SEND_ERROR="Telegram error${code:+ $code}${desc:+: $desc}"
+	# Retry only transient API failures: 429 (rate limit) and 5xx (server side).
+	# Other errors (400/401/403/404 ...) are permanent -> fail fast, no retry.
+	# If the code can't be determined, be safe and treat it as retryable.
+	if [ "$code" = 429 ] || [[ "$code" =~ ^5[0-9][0-9]$ ]] || [ -z "$code" ]; then
+		SEND_RETRYABLE=true
+	fi
+}
+
 FAILED_CHATS=()
 for id in "${CHATS[@]}"; do
 	MY_CURL_OPTIONS="$CURL_OPTIONS --form-string chat_id=$id $URL$TOKEN/$METHOD"
@@ -458,42 +499,40 @@ for id in "${CHATS[@]}"; do
 	success=false
 	while [ "$attempt" -lt "$RETRIES" ]; do
 		attempt=$((attempt + 1))
+
 		if [ "$DRY_RUN" = true ]; then
 			echo "Executing: curl $MY_CURL_OPTIONS"
 			echo "     Text: $TEXT"
 			echo
-			status=0
-			response='{"ok": true}'
-		else
-			response=`curl $MY_CURL_OPTIONS <<< "$TEXT"`
-			status=$?
-		fi
-		log "Response was: $response"
-
-		error=""
-		if [ $status -ne 0 ]; then
-			error="curl reported an error. Exit code was: $status. Response was: $response"
-		elif [ "$HAS_JQ" = true ]; then
-			if [ "$(jq -r '.ok' <<< "$response")" != "true" ]; then
-				error="Telegram reported an error: $(jq -r '"\(.error_code): \(.description)"' <<< "$response")"
-			fi
-		else
-			if [[ "$response" != '{"ok":true'* ]]; then
-				error="Telegram reported an error: $response"
-			fi
-		fi
-
-		if [ -z "$error" ]; then
 			success=true
 			break
 		fi
 
-		echo "Chat $id: attempt $attempt of $RETRIES failed. $error" >&2
-		[ "$attempt" -lt "$RETRIES" ] && sleep "$RETRY_DELAY"
+		response=$(curl $MY_CURL_OPTIONS <<< "$TEXT")
+		status=$?
+		log "Response was: $response"
+		evaluate_response "$status" "$response"
+
+		if [ -z "$SEND_ERROR" ]; then
+			success=true
+			break
+		fi
+
+		if [ "$SEND_RETRYABLE" != true ]; then
+			echo "Chat $id: $SEND_ERROR - permanent, not retrying." >&2
+			break
+		fi
+
+		echo "Chat $id: attempt $attempt of $RETRIES failed. $SEND_ERROR" >&2
+		if [ "$attempt" -lt "$RETRIES" ]; then
+			delay="$RETRY_DELAY"
+			[ "$RETRY_AFTER" -gt "$delay" ] && delay="$RETRY_AFTER"
+			sleep "$delay"
+		fi
 	done
 
 	if [ "$success" != true ]; then
-		echo "Chat $id: giving up after $RETRIES attempt(s)." >&2
+		echo "Chat $id: giving up after $attempt attempt(s)." >&2
 		FAILED_CHATS+=("$id")
 	fi
 done
