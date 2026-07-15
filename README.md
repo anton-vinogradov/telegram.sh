@@ -1,5 +1,12 @@
 # telegram.sh
 
+> Maintained continuation of [fabianonline/telegram.sh](https://github.com/fabianonline/telegram.sh)
+> (upstream inactive since 2022), under the same GPLv3 license and preserving the
+> original authors' history. Additions on top of upstream v0.5:
+> - **`-a <N>`** — retry each recipient up to N times on failure; recipients are
+>   independent (a failure to one no longer aborts the others) and the exit code
+>   is non-zero if any recipient ultimately failed.
+
 ## What does it do?
 
 Telegram offers the feature of bots. A bot allows automated systems and
