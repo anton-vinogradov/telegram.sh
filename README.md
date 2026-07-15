@@ -1,158 +1,234 @@
 # telegram.sh
 
-> Maintained continuation of [fabianonline/telegram.sh](https://github.com/fabianonline/telegram.sh)
-> (upstream inactive since 2022), under the same GPLv3 license and preserving the
-> original authors' history. Additions on top of upstream v0.5:
-> - **`-a <N>`** — retry each recipient up to N times on failure; recipients are
->   independent (a failure to one no longer aborts the others) and the exit code
->   is non-zero if any recipient ultimately failed.
+Send messages, files, images and videos to Telegram from the command line — a
+single, dependency-light `bash` script that talks to the Telegram Bot API.
 
-## What does it do?
+Handy for server notifications: cronjob results, backup status, monitoring
+alerts, or grabbing a small file off a box when SCP is inconvenient.
 
-Telegram offers the feature of bots. A bot allows automated systems and
-servers to send telegram messages to users.
-Quite often it can be useful to send stuff to yourself. A classic
-application of this would be receiving results of cronjob tasks via email.
-Or maybe you want to grab a small file from your server, but downloading it
-via SCP would be too much work or wouldn't work at all because firewall
-stuff / filters / proxy servers / whatever.
+> **Lineage & license.** This is a maintained continuation of
+> [fabianonline/telegram.sh](https://github.com/fabianonline/telegram.sh)
+> (original author Fabian Schlenz; upstream inactive since 2022). It keeps the
+> original **GPLv3** license and the full commit history. See
+> [Changelog](#changelog) for what has been added since upstream v0.5.
 
-telegram.sh allows you to send such things via telegram.
+## Features
 
-## Examples
-
-```bash
-# Send a message to yourself, using a bot token and a chat_id.
-telegram -t 123456:AbcDefGhi-JklMnoPrw -c 12345 "Hello, World."
-
-# You can define the token and chat_id in environment variables or config files.
-# Then you can just use
-telegram "Hello, World."
-
-# Split them into multiple lines
-telegram "Hello,"$'\n'"World."
-# or
-echo -e "Hello\nWorld." | telegram -
-
-# Or you send this one message to another chat:
-telegram -c 6789 "Hello, Mars."
-
-# You can also send messages to multiple chats:
-telegram -c 1234 -c 6789 "Hello, Planets."
-
-# Send stuff via stdin. It will automatically be sent as monospace code:
-ls -l | telegram -
-
-# Use markdown in your message (HTML is available as well):
-telegram -M "To *boldly* go, where _no man_ has gone before."
-
-# Send a local file.
-telegram -f results.txt "Here are the results."
-
-# Or an image, giving you a preview and stuff.
-telegram -i solar_system.png # We don't need to send a message if we're
-# sending a file.
-
-# Or a video.
-telegram -V video.mp4
-
-# Use environment variables to tell curl to use a proxy server:
-HTTPS_PROXY="socks5://127.0.0.1:1234" telegram "Hello, World."
-# Check the curl documentation for more info about supported proxy
-# protocols.
-```
+- Send **text**, **files** (`-f`), **images** (`-i`) and **videos** (`-V`).
+- **Markdown** / **HTML** formatting, monospace code blocks, message titles.
+- Send to **multiple chats** in one call (`-c` repeated).
+- **Per-recipient retries** (`-a`) that retry only *transient* failures and
+  fail fast on permanent ones — see [Retries & exit code](#retries--exit-code).
+- Read config/secrets from **files or environment variables**.
+- Works behind a **proxy** (SOCKS/HTTP).
+- Only needs `bash` and `curl` (`jq` optional).
 
 ## Requirements
 
-Only `bash` and `curl`. Listing known chats with `-l` requires `jq`, but you can
-easily use this tool without this.
+- `bash` and `curl`.
+- `jq` is **optional**. It makes `-l` (listing chats) nicer and lets the retry
+  logic read Telegram error codes precisely; without it the script falls back
+  to plain text parsing and still works.
 
-## Installation / configuration
+## Installation
 
-* Grab the latest `telegram` file from this repository and put it somewhere.
-* Create a bot at telegram:
-  * Search for the user `@botfather` at telegram and start a chat with him.
-  * Use the `/newbot` command to create a new bot. BotFather will give you a
-    token. Keep this.
-* Use your telegram client to send a message to your new bot. Any message
-    will do.
-* Find your chat id. Run telegram.sh with `-l`: `telegram -t
-    <TOKEN> -l`. If you have `jq` installed, it will nicely list its known chats. The number at the front is
-    your chat id. If you don't have `jq` installed, it will print a bit of
-    JSON data and tell you what to look for.
-* You now have your token and your chat id. Send yourself a first message:
-    `telegram -t <TOKEN> -c <CHAT ID> "Hello there."`
+```bash
+# 1. Grab the script and put it on your PATH.
+curl -o /usr/local/bin/telegram https://raw.githubusercontent.com/anton-vinogradov/telegram.sh/master/telegram
+chmod +x /usr/local/bin/telegram
+```
 
-Carrying the token and the chat id around can be quite cumbersome. You can
-define them in 6 different ways:
+Or track the repository so you can update with `git pull`:
 
-1. In a file `/etc/telegram.sh.conf`.
-2. In a file `~/.telegram.sh`.
-3. In a file `~/.telegram.sh.conf`.
-4. In a file in the same folder as this script, called `./telegram.sh.conf`.
-5. In environment variables TELEGRAM_TOKEN and TELEGRAM_CHAT.
-6. As seen above as parameters.
+```bash
+git clone https://github.com/anton-vinogradov/telegram.sh.git
+ln -s "$PWD/telegram.sh/telegram" /usr/local/bin/telegram
+```
 
-Later variants overwrite earlier variants, so you could define token and
-chat in `/etc/telegram.sh.conf` and then overwrite the token with your own
-in `~/.telegram.sh` or on the command line.
+Then create a bot and find your chat id:
 
-The files should look like this:
+1. Talk to [`@BotFather`](https://t.me/botfather), run `/newbot`, and keep the
+   **token** it gives you.
+2. Send your new bot any message from your Telegram client.
+3. Discover your **chat id**: `telegram -t <TOKEN> -l`. With `jq` installed the
+   chats are listed nicely; the number in front is your chat id.
+4. Send your first message: `telegram -t <TOKEN> -c <CHAT_ID> "Hello there."`
+
+## Quick start
+
+```bash
+telegram -t 123456:AbcDefGhi-JklMnoPrw -c 12345 "Hello, World."
+```
+
+Once your token and chat id live in a config file or environment (see
+[Configuration](#configuration)), you can simply run:
+
+```bash
+telegram "Hello, World."
+```
+
+## Usage
+
+```
+telegram [options] [message]
+```
+
+`message` may be `-`, in which case it is read from **stdin**.
+
+| Option | Description |
+|--------|-------------|
+| `-t <TOKEN>` | Bot token to use (see [Configuration](#configuration)). |
+| `-c <CHAT_ID>` | Recipient chat. **Repeatable** — send to several chats at once. |
+| `-a <N>` | Attempts per recipient (**retries**). Recipients are independent. See [Retries](#retries--exit-code). |
+| `-f <FILE>` | Send a file. |
+| `-i <FILE>` | Send a file as an image (must be a real image). |
+| `-V <FILE>` | Send a file as a video. |
+| `-M` | Enable **Markdown** parsing. |
+| `-H` | Enable **HTML** parsing. |
+| `-C` | Send text as monospace code — handy when piping command output. |
+| `-r` | Like `-C`, but a first line starting with `+ ` is specially formatted. |
+| `-T <TITLE>` | Set a title (bold when `-M`/`-H` is used). |
+| `-D` | Disable web-page preview (text messages only). |
+| `-N` | Silent notification (no sound). |
+| `-l` | List known chat ids. |
+| `-m` | Print the last received message: `<Message ID> <Sender ID> <Chat ID> <Text>`. |
+| `-R` | Receive a file that was sent to the bot. |
+
+**Debugging options**
+
+| Option | Description |
+|--------|-------------|
+| `-v` | Verbose output. ⚠️ prints the token — do not use where output is logged. |
+| `-j` | Pretend `jq` is not installed. |
+| `-n` | Dry-run — print what would be sent, don't send. |
+
+## Retries & exit code
+
+`-a <N>` retries delivery to **each recipient independently** up to `N` times.
+It is deliberately conservative about *what* it retries:
+
+- **Retried (transient):** curl/network errors, HTTP **5xx**, and **429** rate
+  limits. On `429` the `retry_after` value from Telegram is honored.
+- **Not retried (permanent):** `400`, `401`, `403`, `404`, … — these won't
+  succeed on a retry (bad token, unknown chat, bot blocked), so they fail fast.
+
+Recipients are independent: a failure to one chat does not stop delivery to the
+others. The delay between attempts is `RETRY_DELAY` seconds (default `2`,
+overridable in a config file).
+
+**Exit code:** `0` if every recipient was delivered, non-zero if any recipient
+ultimately failed — convenient for scripting and monitoring.
+
+```bash
+# Try each recipient up to 10 times, retrying only transient failures.
+telegram -c 111 -c 222 -a 10 -V event.mp4
+```
+
+## Configuration
+
+`TOKEN` and `CHAT_ID` can be provided in six ways. **Later sources override
+earlier ones**, so you can set global defaults and override per call:
+
+1. `/etc/telegram.sh.conf`
+2. `~/.telegram.sh`
+3. `~/.telegram.sh.conf`
+4. `./.telegram.sh.conf` (next to the script)
+5. Environment variables `TELEGRAM_TOKEN` and `TELEGRAM_CHAT`
+6. Command-line options `-t` and `-c`
+
+A config file is plain shell:
 
 ```bash
 TELEGRAM_TOKEN="123456:AbcDefGhi-JlkMno"
 TELEGRAM_CHAT="12345678"
 ```
 
-Multiple chat ids can be defined in a config file as a bash array:
+Multiple chats can be set as a bash array:
 
 ```bash
 TELEGRAM_TOKEN="123456:AbcDefGhi-JlkMno"
-CHATS=(12345678, 23456789, 34567)
+CHATS=(12345678 23456789 34567)
 ```
 
-With such config command `telegram.sh "Hello world"` will deliver message to all listed chat ids.
+> ⚠️ Keep your bot token secret. Config files with a token should not be
+> world-readable, and avoid `-v` anywhere the output is captured to logs.
 
-Please be aware that you should keep your token a secret.
+### Proxy
 
-You can also add permanent proxy settings in there by adding:
+Simplest — point curl at a proxy via the environment:
 
 ```bash
-export HTTPS_PROXY="socks5://127.0.0.1:1234"
+HTTPS_PROXY="socks5://127.0.0.1:1234" telegram "Hello, World."
 ```
 
-See the curl documentation for more information about which proxy protocols
-are supported.
+For a permanent, host-local setup you can override `CURL_OPTIONS` in a config
+file (this also lets you add a timeout, etc.):
 
-## Docker image
+```bash
+# /etc/telegram.sh.conf
+CURL_OPTIONS="-s -x socks5://127.0.0.1:1234 --max-time 60"
+```
+
+See the curl documentation for the supported proxy protocols.
+
+## Examples
+
+```bash
+# Message from token + chat id.
+telegram -t 123456:AbcDefGhi-JklMnoPrw -c 12345 "Hello, World."
+
+# Multi-line message.
+telegram "Hello,"$'\n'"World."
+echo -e "Hello\nWorld." | telegram -
+
+# Send to multiple chats at once.
+telegram -c 1234 -c 6789 "Hello, Planets."
+
+# Pipe command output (sent as monospace code).
+ls -l | telegram -
+
+# Markdown (HTML is available via -H).
+telegram -M "To *boldly* go, where _no man_ has gone before."
+
+# Send a file, an image, or a video.
+telegram -f results.txt "Here are the results."
+telegram -i solar_system.png
+telegram -V clip.mp4
+```
+
+## Docker
+
 ```bash
 docker build -t telegram:latest .
 docker run -it --rm telegram
 ```
 
-
 ## Changelog
-### Version 0.5
-* New option `-V`to send a video file.
-* Configuration can now also be set from a file called `.telegram.sh.conf`
-  in the same folder as this script.
-### Version 0.4
-* New option `-m` to receive the last received message. You could use this
-  e.g. to regularly poll the last message and react on commands.
-  Format of the response is `<Message ID> <Sender ID> <Chat ID> <Text>`.
-  You could use this feature like this:
-  ```
-  telegram -m | read message_id sender_id chat_id text
-  echo "MessageID: $message_id"
-  echo "Text:      $text"
-  ```
 
-### Contributors
-* abadroot
-* dbarthe
-* hugows
-* kgizdov
-* KOPACb
-* rerime
-* rusalex
-* sergiks
+### 0.7
+- Smarter `-a` retries: only **transient** failures (network/curl errors, HTTP
+  5xx, 429) are retried, honoring the `429 retry_after` hint; permanent errors
+  (4xx) now **fail fast** instead of exhausting all attempts.
+- Fixed dry-run (`-n`) falsely reporting a failure when `jq` is unavailable.
+
+### 0.6
+- New `-a <N>` option: retry delivery to each recipient up to `N` times.
+  Recipients are independent, and the exit code is non-zero if any recipient
+  ultimately failed.
+
+### 0.5
+- New option `-V` to send a video file.
+- Configuration can also be read from `./.telegram.sh.conf` next to the script.
+
+### 0.4
+- New option `-m` to output the last received message — useful for polling and
+  reacting to commands.
+
+## Credits
+
+Original author **Fabian Schlenz** and upstream contributors: abadroot,
+dbarthe, hugows, kgizdov, KOPACb, rerime, rusalex, sergiks.
+
+## License
+
+GPLv3 — see [LICENSE](LICENSE).
