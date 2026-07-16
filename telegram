@@ -110,8 +110,8 @@ function list_chats {
 		echo "If there are no chats or the chat you are looking for isn't there, run this command again"
 		echo "after sending a message to your bot via telegram."
 		echo
-		jq -r '.result | .[].message.chat | "\(.id|tostring) - \(.first_name) \(.last_name) (@\(.username))"' 2>/dev/null <<< "$response" || {
-			echo "Could not parse reponse from Telegram."
+		jq -r '[.result[] | (.message // .edited_message // .channel_post // empty).chat | select(. != null)] | unique_by(.id) | .[] | "\(.id) - \(.title // ([.first_name, .last_name] | map(select(. != null)) | join(" ")))\(if .username then " (@" + .username + ")" else "" end)"' 2>/dev/null <<< "$response" || {
+			echo "Could not parse response from Telegram."
 			echo "Response was: $response"
 			exit 1
 		}
