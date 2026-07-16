@@ -1,8 +1,8 @@
 FROM alpine
 
-WORKDIR /
+RUN apk add --no-cache bash curl jq
 
-RUN apk add --no-cache bash curl
+COPY telegram /usr/local/bin/telegram
 
-COPY telegram /bin/telegram
-
+ENTRYPOINT ["/usr/local/bin/telegram"]
+CMD ["-h"]
