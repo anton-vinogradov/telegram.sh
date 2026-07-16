@@ -221,7 +221,7 @@ function escapeMarkdown {
 	echo "$res"
 }
 
-while getopts "pa:t:c:i:f:V:MHCrhlvjnRmDNT:" opt; do
+while getopts ":pa:t:c:i:f:V:MHCrhlvjnRmDNT:" opt; do
 	case $opt in
 		t)
 			TOKEN="$OPTARG"
@@ -285,16 +285,17 @@ while getopts "pa:t:c:i:f:V:MHCrhlvjnRmDNT:" opt; do
 		T)
 			TITLE="$OPTARG"
 			;;
-		?|h)
+		h)
 			help
 			;;
 		:)
-			echo "Option -$OPTARG needs an argument."
-			exit 1
+			echo "Option -$OPTARG needs an argument." >&2
+			exit 2
 			;;
 		\?)
-			echo "Invalid option -$OPTARG"
-			exit 1
+			echo "Invalid option -$OPTARG" >&2
+			echo "Run $0 -h for help." >&2
+			exit 2
 			;;
 	esac
 done
