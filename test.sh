@@ -20,6 +20,11 @@ run() {
 	env -u TELEGRAM_TOKEN -u TELEGRAM_CHAT HOME="$TMP" "$@"
 }
 
+# indent <text> - print text indented for failure details.
+indent() {
+	while IFS= read -r l; do printf '       %s\n' "$l"; done <<< "$1"
+}
+
 # t <name> <expected_exit> <expected_pattern> -- <cmd...>
 # Pattern is a fixed string; prefix with '!' to assert absence; '-' skips.
 t() {
@@ -31,7 +36,7 @@ t() {
 	rc=$?
 	if [ "$rc" != "$want_exit" ]; then
 		echo "FAIL: $name - exit $rc, expected $want_exit"
-		echo "$out" | sed 's/^/       /'
+		indent "$out"
 		FAIL=$((FAIL + 1))
 		return
 	fi
@@ -39,13 +44,13 @@ t() {
 		if [ "${want:0:1}" = "!" ]; then
 			if grep -qF -- "${want:1}" <<< "$out"; then
 				echo "FAIL: $name - output must NOT contain: ${want:1}"
-				echo "$out" | sed 's/^/       /'
+				indent "$out"
 				FAIL=$((FAIL + 1))
 				return
 			fi
 		elif ! grep -qF -- "$want" <<< "$out"; then
 			echo "FAIL: $name - output does not contain: $want"
-			echo "$out" | sed 's/^/       /'
+			indent "$out"
 			FAIL=$((FAIL + 1))
 			return
 		fi

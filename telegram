@@ -145,7 +145,6 @@ function receive_message {
 	fi
 	
 	jq -r '.result[-1].message | [(.message_id|tostring), (.from.id|tostring), (.chat.id|tostring), .text] | join(" ")' <<< "$result"
-	exit 0
 }
 		
 
@@ -324,9 +323,13 @@ ENV_CHAT="$TELEGRAM_CHAT"
 
 log "Importing config file(s)..."
 
+# shellcheck source=/dev/null
 [ -r /etc/telegram.sh.conf ] && source /etc/telegram.sh.conf
+# shellcheck source=/dev/null
 [ -r ~/.telegram.sh ] && source ~/.telegram.sh
+# shellcheck source=/dev/null
 [ -r ~/.telegram.sh.conf ] && source ~/.telegram.sh.conf
+# shellcheck source=/dev/null
 [ -r "$(dirname "$0")/.telegram.sh.conf" ] && source "$(dirname "$0")/.telegram.sh.conf"
 
 # 1) Lowest priority: config files (TOKEN=/CHATS=(...) set directly, or via
