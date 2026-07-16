@@ -32,7 +32,11 @@ DISABLE_NOTIFICATION=false
 
 URL="https://api.telegram.org/bot"
 FILE_URL="https://api.telegram.org/file/bot"
-CURL_OPTIONS="-s"
+# Default network behavior: fail a connection attempt after 10s and cap the
+# whole transfer at 300s (headroom for a 50MB upload on a slow uplink), so a
+# dead proxy or a hung TCP session can't block a cronjob forever.
+# Overridable via CURL_OPTIONS in a config file.
+CURL_OPTIONS="-s --connect-timeout 10 --max-time 300"
 RETRIES=1
 RETRY_DELAY=2
 PARALLEL=false
