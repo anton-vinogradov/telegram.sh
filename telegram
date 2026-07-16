@@ -300,24 +300,32 @@ if [ "$CRON_MODE" -eq 1 ] && [ "$CODE_MODE" -eq 1 ]; then
 	exit 1
 fi
 
-log "TOKEN is now $TOKEN"
-log "CHATS is now ${CHATS[*]}"
-
-[ -z "$TOKEN" ] && TOKEN=$TELEGRAM_TOKEN
-[ ${#CHATS[@]} -eq 0 ] && CHATS=($TELEGRAM_CHAT)
-
-log "TOKEN is now $TOKEN"
-log "CHATS is now ${CHATS[*]}"
+# Remember what came from the command line and the environment, so the
+# documented precedence survives sourcing the config files:
+#   config files < environment variables < command-line options.
+CLI_TOKEN="$TOKEN"
+CLI_CHATS=("${CHATS[@]}")
+ENV_TOKEN="$TELEGRAM_TOKEN"
+ENV_CHAT="$TELEGRAM_CHAT"
 
 log "Importing config file(s)..."
 
 [ -r /etc/telegram.sh.conf ] && source /etc/telegram.sh.conf
 [ -r ~/.telegram.sh ] && source ~/.telegram.sh
 [ -r ~/.telegram.sh.conf ] && source ~/.telegram.sh.conf
-[ -r `dirname $0`/.telegram.sh.conf ] && source `dirname $0`/.telegram.sh.conf
+[ -r "$(dirname "$0")/.telegram.sh.conf" ] && source "$(dirname "$0")/.telegram.sh.conf"
 
-[ -z "$TOKEN" ] && TOKEN=$TELEGRAM_TOKEN
-[ ${#CHATS[@]} -eq 0 ] && CHATS=($TELEGRAM_CHAT)
+# 1) Lowest priority: config files (TOKEN=/CHATS=(...) set directly, or via
+#    the TELEGRAM_TOKEN / TELEGRAM_CHAT variables).
+[ -z "$TOKEN" ] && TOKEN="$TELEGRAM_TOKEN"
+[ ${#CHATS[@]} -eq 0 ] && read -ra CHATS <<< "$TELEGRAM_CHAT"
+# 2) Environment variables override config files.
+[ -n "$ENV_TOKEN" ] && TOKEN="$ENV_TOKEN"
+[ -n "$ENV_CHAT" ] && read -ra CHATS <<< "$ENV_CHAT"
+# 3) Command-line options override everything.
+[ -n "$CLI_TOKEN" ] && TOKEN="$CLI_TOKEN"
+[ ${#CLI_CHATS[@]} -gt 0 ] && CHATS=("${CLI_CHATS[@]}")
+
 [ -n "$TELEGRAM_DISABLE_WEB_PAGE_PREVIEW" ] && DISABLE_WEB_PAGE_PREVIEW="$TELEGRAM_DISABLE_WEB_PAGE_PREVIEW"
 [ -n "$TELEGRAM_DISABLE_NOTIFICATION" ] && DISABLE_NOTIFICATION="$TELEGRAM_DISABLE_NOTIFICATION"
 
