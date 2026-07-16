@@ -499,6 +499,8 @@ fi
 [ "$DISABLE_NOTIFICATION" = true ] && CURL_ARGS+=(--form-string "disable_notification=true")
 
 [[ "$RETRIES" =~ ^[0-9]+$ ]] && [ "$RETRIES" -ge 1 ] || RETRIES=1
+# RETRY_DELAY may come from a config file - guard against non-numeric values.
+[[ "$RETRY_DELAY" =~ ^[0-9]+$ ]] || RETRY_DELAY=2
 
 # Classify one send attempt.
 #   Args:  <curl_exit_status> <response_body>
@@ -524,6 +526,7 @@ evaluate_response() {
 	else
 		[[ "$response" == '{"ok":true'* ]] && ok=true || ok=false
 		code=$(sed -n 's/.*"error_code":[[:space:]]*\([0-9]\{1,\}\).*/\1/p' <<< "$response")
+		RETRY_AFTER=$(sed -n 's/.*"retry_after":[[:space:]]*\([0-9]\{1,\}\).*/\1/p' <<< "$response")
 		desc="$response"
 	fi
 	[[ "$RETRY_AFTER" =~ ^[0-9]+$ ]] || RETRY_AFTER=0
