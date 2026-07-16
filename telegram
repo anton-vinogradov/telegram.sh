@@ -97,7 +97,8 @@ function version {
 
 function list_chats {
 	log "$URL$TOKEN"
-	response=`curl $CURL_OPTIONS $URL$TOKEN/getUpdates`
+	# shellcheck disable=SC2086 # CURL_OPTIONS word splitting is documented
+	response=$(curl $CURL_OPTIONS "$URL$TOKEN/getUpdates")
 	log "$response"
 
 	if [ "$HAS_JQ" = true ]; then
@@ -131,9 +132,10 @@ function receive_message {
 		exit 1
 	fi
 	
-	result=`curl $CURL_OPTIONS $URL$TOKEN/getUpdates?allowed_updates=message`
+	# shellcheck disable=SC2086 # CURL_OPTIONS word splitting is documented
+	result=$(curl $CURL_OPTIONS "$URL$TOKEN/getUpdates?allowed_updates=message")
 	log "$result"
-	if [ "`jq '.result' <<< "$result"`" = "[]" ]; then
+	if [ "$(jq '.result' <<< "$result")" = "[]" ]; then
 		echo "No recent messages."
 		exit 1
 	fi
@@ -149,7 +151,8 @@ function receive_file {
 		exit 1
 	fi
 
-	result=`curl $CURL_OPTIONS $URL$TOKEN/getUpdates?allowed_updates=message`
+	# shellcheck disable=SC2086 # CURL_OPTIONS word splitting is documented
+	result=$(curl $CURL_OPTIONS "$URL$TOKEN/getUpdates?allowed_updates=message")
 	log "$result"
 	# {"ok":true,"result":[
 	#   {
@@ -168,8 +171,9 @@ function receive_file {
 	fi
 	file_name=`jq -r '.result[-1].message.document.file_name' <<< "$result"`
 	log "file_name: $file_name"
-	result=`curl $CURL_OPTIONS $URL$TOKEN/getFile?file_id=$file_id`
-	log $result
+	# shellcheck disable=SC2086 # CURL_OPTIONS word splitting is documented
+	result=$(curl $CURL_OPTIONS "$URL$TOKEN/getFile?file_id=$file_id")
+	log "$result"
 	# {"ok":true,"result":{"file_id":"BQAav-HkXugI","file_size":282,"file_path":"documents/file_271.ini"}}
 	path=`jq -r '.result.file_path' <<< "$result"`
 	log "path: $path"
@@ -183,7 +187,7 @@ function receive_file {
 		echo "File $file_name already exists. This is unexpected, so I'm quitting now."
 		exit 1
 	fi
-	curl $FILE_URL$TOKEN/$path --output "$file_name"
+	curl "$FILE_URL$TOKEN/$path" --output "$file_name"
 	echo "File downloaded as $file_name"
 }
 
@@ -438,41 +442,56 @@ if [ -n "$IMAGE_FILE" ] && [ -n "$VIDEO_FILE" ]; then
 fi
 
 
-[ -n "$PARSE_MODE" ] && CURL_OPTIONS="$CURL_OPTIONS --form-string parse_mode=$PARSE_MODE"
+# Arguments the script builds itself go into an array, so file names with
+# spaces and other special characters survive word splitting. CURL_OPTIONS
+# stays a plain string: it is a documented user knob for simple extra
+# options (proxy, timeouts) and is word-split on purpose.
+CURL_ARGS=()
+
+# curl's --form parser accepts a quoted filename after @ ("..."), which makes
+# spaces, commas and semicolons in paths safe. Escape per curl's quoting rules.
+function form_file_arg {
+	local path="$2"
+	path="${path//\\/\\\\}"
+	path="${path//\"/\\\"}"
+	printf '%s=@"%s"' "$1" "$path"
+}
+
+[ -n "$PARSE_MODE" ] && CURL_ARGS+=(--form-string "parse_mode=$PARSE_MODE")
 if [ -n "$DOCUMENT_FILE" ]; then
 	check_file "$DOCUMENT_FILE"
 
-	CURL_OPTIONS="$CURL_OPTIONS --form document=@\"$DOCUMENT_FILE\""
-	CURL_OPTIONS="$CURL_OPTIONS --form caption=<-"
+	CURL_ARGS+=(--form "$(form_file_arg document "$DOCUMENT_FILE")")
+	CURL_ARGS+=(--form "caption=<-")
 	METHOD="sendDocument"
 elif [ -n "$VIDEO_FILE" ]; then
 	check_file "$VIDEO_FILE"
 
-	CURL_OPTIONS="$CURL_OPTIONS --form video=@\"$VIDEO_FILE\""
-	CURL_OPTIONS="$CURL_OPTIONS --form caption=<-"
-	CURL_OPTIONS="$CURL_OPTIONS --form-string supports_streaming=true"
+	CURL_ARGS+=(--form "$(form_file_arg video "$VIDEO_FILE")")
+	CURL_ARGS+=(--form "caption=<-")
+	CURL_ARGS+=(--form-string "supports_streaming=true")
 	# Provide width/height/duration when ffprobe is available, so Telegram shows
 	# the correct aspect ratio and a preview without having to probe the upload.
 	if hash ffprobe 2>/dev/null; then
 		vdims=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height:format=duration -of default=nw=1:nk=1 "$VIDEO_FILE" 2>/dev/null | paste -sd' ' -)
 		read -r vw vh vdur _ <<< "$vdims"
-		[[ "$vw"   =~ ^[0-9]+$ ]] && CURL_OPTIONS="$CURL_OPTIONS --form-string width=$vw"
-		[[ "$vh"   =~ ^[0-9]+$ ]] && CURL_OPTIONS="$CURL_OPTIONS --form-string height=$vh"
-		[[ "$vdur" =~ ^[0-9]+   ]] && CURL_OPTIONS="$CURL_OPTIONS --form-string duration=${vdur%%.*}"
+		[[ "$vw"   =~ ^[0-9]+$ ]] && CURL_ARGS+=(--form-string "width=$vw")
+		[[ "$vh"   =~ ^[0-9]+$ ]] && CURL_ARGS+=(--form-string "height=$vh")
+		[[ "$vdur" =~ ^[0-9]+   ]] && CURL_ARGS+=(--form-string "duration=${vdur%%.*}")
 	fi
 	METHOD="sendVideo"
 elif [ -n "$IMAGE_FILE" ]; then
 	check_file "$IMAGE_FILE"
-	CURL_OPTIONS="$CURL_OPTIONS --form photo=@\"$IMAGE_FILE\""
-	CURL_OPTIONS="$CURL_OPTIONS --form caption=<-"
+	CURL_ARGS+=(--form "$(form_file_arg photo "$IMAGE_FILE")")
+	CURL_ARGS+=(--form "caption=<-")
 	METHOD="sendPhoto"
 else
-	CURL_OPTIONS="$CURL_OPTIONS --form text=<-"
-	[ "$DISABLE_WEB_PAGE_PREVIEW" = true ] && CURL_OPTIONS="$CURL_OPTIONS --form-string link_preview_options={\"is_disabled\":true}"
+	CURL_ARGS+=(--form "text=<-")
+	[ "$DISABLE_WEB_PAGE_PREVIEW" = true ] && CURL_ARGS+=(--form-string 'link_preview_options={"is_disabled":true}')
 	METHOD="sendMessage"
 fi
 
-[ "$DISABLE_NOTIFICATION" = true ] && CURL_OPTIONS="$CURL_OPTIONS --form-string disable_notification=true"
+[ "$DISABLE_NOTIFICATION" = true ] && CURL_ARGS+=(--form-string "disable_notification=true")
 
 [[ "$RETRIES" =~ ^[0-9]+$ ]] && [ "$RETRIES" -ge 1 ] || RETRIES=1
 
@@ -519,19 +538,21 @@ evaluate_response() {
 #   Arg:    <chat_id>
 #   Return: 0 if delivered, non-zero otherwise. Progress goes to stderr.
 send_to_chat() {
-	local id="$1" MY_CURL_OPTIONS response status attempt=0 delay
-	MY_CURL_OPTIONS="$CURL_OPTIONS --form-string chat_id=$id $URL$TOKEN/$METHOD"
+	local id="$1" response status attempt=0 delay args
+	# shellcheck disable=SC2206 # CURL_OPTIONS is a user knob; word splitting is documented
+	args=($CURL_OPTIONS)
+	args+=("${CURL_ARGS[@]}" --form-string "chat_id=$id" "$URL$TOKEN/$METHOD")
 	while [ "$attempt" -lt "$RETRIES" ]; do
 		attempt=$((attempt + 1))
 
 		if [ "$DRY_RUN" = true ]; then
-			echo "Executing: curl $MY_CURL_OPTIONS"
+			echo "Executing: curl$(printf ' %q' "${args[@]}")"
 			echo "     Text: $TEXT"
 			echo
 			return 0
 		fi
 
-		response=$(curl $MY_CURL_OPTIONS <<< "$TEXT")
+		response=$(curl "${args[@]}" <<< "$TEXT")
 		status=$?
 		log "Response was: $response"
 		evaluate_response "$status" "$response"
