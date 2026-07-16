@@ -174,6 +174,8 @@ function receive_file {
 		exit 1
 	fi
 	file_name=`jq -r '.result[-1].message.document.file_name' <<< "$result"`
+	# The name comes from the sender - strip any path components.
+	file_name="${file_name//\//_}"
 	log "file_name: $file_name"
 	# shellcheck disable=SC2086 # CURL_OPTIONS word splitting is documented
 	result=$(curl $CURL_OPTIONS "$URL$TOKEN/getFile?file_id=$file_id")
@@ -200,19 +202,20 @@ function log {
 }
 
 function check_file {
+	local limit_mb="${2:-50}"
 	if [ ! -e "$1" ]; then
 		echo "The file $1 does not exist."
 		exit 1
 	fi
-	
+
 	case "$(uname -s)" in
 		Darwin*) # OSX
 			size=$(stat -f%z "$1");;
 		*)
 			size=$(stat --printf="%s" "$1");;
 	esac
-	if (( size > 52428800 )); then
-		echo "File $1 is breaking the file size limit imposed on Telegram bots (currently 50MB)."
+	if (( size > limit_mb * 1024 * 1024 )); then
+		echo "File $1 is breaking the ${limit_mb}MB size limit Telegram imposes on bots for this upload type."
 		exit 1
 	fi
 }
@@ -486,7 +489,7 @@ elif [ -n "$VIDEO_FILE" ]; then
 	fi
 	METHOD="sendVideo"
 elif [ -n "$IMAGE_FILE" ]; then
-	check_file "$IMAGE_FILE"
+	check_file "$IMAGE_FILE" 10   # sendPhoto has a lower limit than documents/videos
 	CURL_ARGS+=(--form "$(form_file_arg photo "$IMAGE_FILE")")
 	CURL_ARGS+=(--form "caption=<-")
 	METHOD="sendPhoto"
@@ -497,6 +500,10 @@ else
 fi
 
 [ "$DISABLE_NOTIFICATION" = true ] && CURL_ARGS+=(--form-string "disable_notification=true")
+
+if [ "$METHOD" != "sendMessage" ] && [ ${#TEXT} -gt 1024 ]; then
+	echo "Warning: caption is ${#TEXT} characters, Telegram's limit is 1024 - the API will likely reject this message." >&2
+fi
 
 [[ "$RETRIES" =~ ^[0-9]+$ ]] && [ "$RETRIES" -ge 1 ] || RETRIES=1
 # RETRY_DELAY may come from a config file - guard against non-numeric values.
@@ -587,6 +594,7 @@ FAILED_CHATS=()
 if [ "$PARALLEL" = true ] && [ "$DRY_RUN" != true ]; then
 	# Deliver to every recipient concurrently; collect per-chat exit codes.
 	results=$(mktemp -d)
+	trap 'rm -rf "$results"' EXIT
 	for id in "${CHATS[@]}"; do
 		( send_to_chat "$id"; echo "$?" > "$results/$id" ) &
 	done
