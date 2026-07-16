@@ -197,8 +197,18 @@ function receive_file {
 	echo "File downloaded as $file_name"
 }
 
+# Replace the bot token with a stub in text destined for the terminal, so
+# -v and -n output can be pasted into tickets or logs without leaking it.
+function mask_token {
+	if [ -n "$TOKEN" ]; then
+		printf '%s\n' "${1//"$TOKEN"/${TOKEN:0:8}<hidden>}"
+	else
+		printf '%s\n' "$1"
+	fi
+}
+
 function log {
-	[ "$DEBUG" = true ] && echo "DEBUG: $1"
+	[ "$DEBUG" = true ] && echo "DEBUG: $(mask_token "$1")"
 }
 
 function check_file {
@@ -561,7 +571,7 @@ send_to_chat() {
 		attempt=$((attempt + 1))
 
 		if [ "$DRY_RUN" = true ]; then
-			echo "Executing: curl$(printf ' %q' "${args[@]}")"
+			echo "Executing: curl$(mask_token "$(printf ' %q' "${args[@]}")")"
 			echo "     Text: $TEXT"
 			echo
 			return 0
