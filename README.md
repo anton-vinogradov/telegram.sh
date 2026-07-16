@@ -99,7 +99,7 @@ telegram [options] [message]
 
 | Option | Description |
 |--------|-------------|
-| `-v` | Verbose output. ⚠️ prints the token — do not use where output is logged. |
+| `-v` | Verbose output (the bot token is masked). |
 | `-j` | Pretend `jq` is not installed. |
 | `-n` | Dry-run — print what would be sent, don't send. |
 
@@ -152,7 +152,7 @@ CHATS=(12345678 23456789 34567)
 ```
 
 > ⚠️ Keep your bot token secret. Config files with a token should not be
-> world-readable, and avoid `-v` anywhere the output is captured to logs.
+> world-readable. (`-v` and dry-run output mask the token since 0.10.)
 
 ### Proxy
 
@@ -163,11 +163,12 @@ HTTPS_PROXY="socks5://127.0.0.1:1234" telegram "Hello, World."
 ```
 
 For a permanent, host-local setup you can override `CURL_OPTIONS` in a config
-file (this also lets you add a timeout, etc.):
+file. The default is `-s --connect-timeout 10 --max-time 300`; overriding
+replaces it entirely, so keep the timeouts you want:
 
 ```bash
 # /etc/telegram.sh.conf
-CURL_OPTIONS="-s -x socks5://127.0.0.1:1234 --max-time 60"
+CURL_OPTIONS="-s -x socks5://127.0.0.1:1234 --connect-timeout 10 --max-time 60"
 ```
 
 See the curl documentation for the supported proxy protocols.
@@ -201,10 +202,32 @@ telegram -V clip.mp4
 
 ```bash
 docker build -t telegram:latest .
-docker run -it --rm telegram
+docker run --rm telegram -t <TOKEN> -c <CHAT_ID> "Hello from Docker."
 ```
 
 ## Changelog
+
+### 0.10
+- **Fixed precedence:** `-c`/`-t` on the command line now really override
+  config files (a config defining `CHATS=(...)` used to win silently).
+  The documented order — config files < environment < options — now holds.
+- **Files with spaces** (and commas/semicolons) in their names now upload
+  correctly: curl arguments are built as an array and file paths use curl's
+  quoted-filename syntax.
+- **Default network timeouts** (`--connect-timeout 10 --max-time 300`), so a
+  dead proxy or hung connection can't block a cronjob forever. Overridable
+  via `CURL_OPTIONS`.
+- Usage errors (unknown option, missing argument) now exit with code `2`
+  instead of printing help and exiting `0`.
+- `429 retry_after` is honored even without `jq`.
+- `sendPhoto` is checked against its real 10MB limit; captions longer than
+  1024 characters produce a warning.
+- `-l` lists groups and channels by title, skips non-message updates and
+  dedupes chats (no more `null - null null (@null)`).
+- The bot token is masked in `-v` and dry-run output.
+- Docker image now has an `ENTRYPOINT` and ships `jq`.
+- Real smoke-test suite (`test.sh`, 26 checks) + GitHub Actions CI
+  (shellcheck + tests).
 
 ### 0.9
 - `sendVideo` now sends `supports_streaming=true` and, when `ffprobe` is
