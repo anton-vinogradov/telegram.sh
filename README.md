@@ -281,42 +281,82 @@ telegram -c 1234 -c 6789 -a 5 -p -V clip.mp4 "For both of you."
 # listed on stderr as "Failed to deliver to: <ids>".
 ```
 
-### Editing messages (placeholder → morph)
+### Editing messages (`-I` + `-e`): one message that upgrades itself
+
+How it works, in one breath: `-I` makes every successful send print
+`msgid <chat> <message_id>` on stdout. Save those pairs. Later, pass them back
+as `-e <chat>:<message_id>` *instead of* `-c <chat>` — the bot then **edits**
+that message rather than sending a new one: with a message argument the text
+is replaced, with `-V`/`-i`/`-f` the message *becomes* that media (a plain
+text message really does turn into a photo or video in place). Edits are
+silent — subscribers get exactly one notification, from the original send.
+
+Real wiring — one Telegram message per camera event that upgrades itself
+(instant text → alarm snapshot a second later → full video at event end):
 
 ```bash
-# -I prints 'msgid <chat> <message_id>' for every delivered message,
-# so you can address it later with -e.
-telegram -I -c 1234 "recording..."          # -> msgid 1234 567
+#!/bin/bash
+CHATS=(-c 1234 -c 6789)
 
-# Replace the text of that very message (editMessageText).
-telegram -e 1234:567 "still recording..."
+# Phase 1 - the instant something happens: cheap text, delivered in ~0.2s.
+# -p delivers to all chats in parallel, -I prints one "msgid ..." line each.
+out=$(telegram "${CHATS[@]}" -p -I -a 2 "🎥 $(date +%H:%M:%S)")
 
-# Turn the SAME message into a photo (editMessageMedia - yes, a plain
-# text message becomes a media message in place).
-telegram -e 1234:567 -i first_frame.jpg "10:42:07"
+# Turn the msgid lines into "-e chat:id" targets for the next phases.
+targets=()
+while read -r _ chat id; do targets+=(-e "$chat:$id"); done < <(grep ^msgid <<< "$out")
 
-# ...and finally into the video (no caption - the media replaces it all).
-# -e is repeatable; retries (-a) and parallelism (-p) work as for sends.
-telegram -e 1234:567 -e 6789:890 -p -a 3 -V clip.mp4
+# Phase 2 - a snapshot exists: the text message BECOMES a photo.
+# Best-effort (-a 1): if it fails, the video will replace it anyway.
+telegram "${targets[@]}" -p -a 1 -i alarm.jpg "$(date +%H:%M:%S)"
+
+# Phase 3 - the video is ready: the same message becomes the video.
+telegram "${targets[@]}" -p -a 3 -V event.mp4
 ```
 
-### Offline queue (store-and-forward)
+The chat shows a *single* message the whole time: it appears instantly as
+text, sprouts a picture a second later, and finally plays as a video. The
+notification sound fires once — for the text.
+
+### Offline queue (`-q` + `-d`): guaranteed delivery
+
+How it works, in one breath: with `-q <dir>`, every recipient that is still
+undelivered after all `-a` retries is written into `<dir>` as one small file
+describing the exact delivery (target, media file, text, token — so
+`chmod 700` the directory). A separate `telegram -d <dir>` run — from cron or
+a systemd timer — replays those files oldest-first: delivered and permanently
+rejected entries are deleted, transient failures stay queued for the next
+run. With `-x <seconds>` an entry eventually expires: the message argument is
+delivered *instead of* the payload (as an **edit** if the target was
+`chat:msgid`, as a plain message otherwise), and the entry is dropped.
+
+Real wiring — sender plus a retry timer:
 
 ```bash
-# Queue on failure (-q): recipients that still fail after all retries are
-# stored as queue files (they contain the token - chmod 700 the dir!).
-telegram -c 1234 -a 3 -q /var/spool/tg-queue -V clip.mp4
-
-# Drain the queue (-d) from cron or a systemd timer, every few minutes:
-# replays entries oldest-first under a lock; delivered and permanently
-# rejected entries are removed, transient failures stay for the next run.
-telegram -d /var/spool/tg-queue
-
-# Same, with expiry (-x): entries older than 6h are dropped after
-# delivering the notice instead (an edit for chat:msgid targets,
-# a plain message for chat targets).
-telegram -d /var/spool/tg-queue -x 21600 "❌ delivery failed"
+# Sender (camera event, backup job, ...): 3 attempts now, spool on failure.
+telegram -c 1234 -c 6789 -p -a 3 -q /var/spool/tg-queue -V event.mp4
 ```
+
+```bash
+# /etc/cron.d/telegram-drain - retry every 2 minutes, give up after 6 hours.
+*/2 * * * * root /usr/local/bin/telegram -d /var/spool/tg-queue -x 21600 "❌ delivery failed"
+```
+
+What actually happens when the network dies mid-day:
+
+```
+14:02  send fails after 3 attempts  -> queue file written, sender exits 1
+14:04  drain: network still down    -> entry stays queued
+14:06  drain: still down            -> entry stays queued
+14:37  drain: network is back       -> video delivered, entry removed
+```
+
+The two recipes compose. Add `-q` to phase 3 of the camera script above: the
+placeholder is already in the chat, so when the network returns the queued
+*edit* turns it into the video — and if 6 hours pass first, the very same
+message turns into "❌ delivery failed" instead. Either way the subscriber
+sees the event and its outcome in one message, in the right chronological
+position.
 
 ### Discovering chats, receiving
 
