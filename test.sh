@@ -95,6 +95,18 @@ t "-N sets disable_notification"            0 "disable_notification=true" -- ./t
 t "-T prepends bold title with -M"          0 '*Title*' -- ./telegram -t T -c 1 -n -M -T Title hi
 t "stdin message via -"                     0 "Text: from stdin" -- bash -c 'echo "from stdin" | ./telegram -t T -c 1 -n -'
 
+### Editing messages (-e) and message ids (-I) ################################
+t "-e with -V uses editMessageMedia"        0 "editMessageMedia" -- ./telegram -t T -n -e 123:45 -V "my file.txt" cap
+t "-e media JSON is InputMediaVideo"        0 'media=\{\"type\":\"video\"' -- ./telegram -t T -n -e 123:45 -V "my file.txt" cap
+t "-e passes message_id"                    0 "message_id=45" -- ./telegram -t T -n -e 123:45 -V "my file.txt" cap
+t "-e splits chat_id from target"           0 "chat_id=123" -- ./telegram -t T -n -e 123:45 -V "my file.txt" cap
+t "-e negative chat id accepted"            0 "chat_id=-100987" -- ./telegram -t T -n -e -100987:45 -V "my file.txt" cap
+# token "SECRET" (not "T"): mask_token would mangle the literal "editMessageText"
+t "-e text only uses editMessageText"       0 "editMessageText" -- ./telegram -t SECRET -n -e 123:45 "new text"
+t "-e works without -c"                     0 "!No chat(s)" -- ./telegram -t T -n -e 123:45 hi
+t "-e bad target rejected"                  1 "Invalid -e target" -- ./telegram -t T -n -e nonsense -V "my file.txt" cap
+t "-I flag accepted"                        0 - -- ./telegram -t T -c 1 -n -I hi
+
 ### Size limits ###############################################################
 dd if=/dev/zero of=big.bin bs=1024 count=11264 2>/dev/null
 

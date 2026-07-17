@@ -79,6 +79,8 @@ telegram [options] [message]
 |--------|-------------|
 | `-t <TOKEN>` | Bot token to use (see [Configuration](#configuration)). |
 | `-c <CHAT_ID>` | Recipient chat. **Repeatable** — send to several chats at once. |
+| `-e <CHAT:MSGID>` | **Edit** an existing message instead of sending. Repeatable; replaces `-c`. With `-V`/`-i`/`-f` the message *becomes* that media (`editMessageMedia` — this also turns a plain text message into a media message); with text only, the text is replaced (`editMessageText`). |
+| `-I` | Print `msgid <chat> <message_id>` for every delivered message, so you can `-e` it later. |
 | `-a <N>` | Attempts per recipient (**retries**). Recipients are independent. See [Retries](#retries--exit-code). |
 | `-p` | Deliver to all recipients **in parallel** (independently) instead of sequentially. |
 | `-f <FILE>` | Send a file. |
@@ -196,6 +198,12 @@ telegram -M "To *boldly* go, where _no man_ has gone before."
 telegram -f results.txt "Here are the results."
 telegram -i solar_system.png
 telegram -V clip.mp4
+
+# Instant placeholder, then morph it into the video when it's ready:
+# send a short text and remember its message id...
+telegram -I -c 1234 "recording..."        # prints: msgid 1234 567
+# ...later, replace that very message with the video (text -> video).
+telegram -e 1234:567 -V clip.mp4 "here it is"
 ```
 
 ## Docker
@@ -206,6 +214,17 @@ docker run --rm telegram -t <TOKEN> -c <CHAT_ID> "Hello from Docker."
 ```
 
 ## Changelog
+
+### 0.11
+- **Editing messages:** new `-e <chat>:<message_id>` mode (repeatable, replaces
+  `-c`). With a file it runs `editMessageMedia` — including turning a plain
+  *text* message into a video/photo/document; with text only it runs
+  `editMessageText`. Retries (`-a`), parallelism (`-p`) and the transient/
+  permanent error classification apply to edits exactly as to sends.
+- **`-I`:** print `msgid <chat> <message_id>` for every delivered message, so
+  callers can edit it later (placeholder-then-morph workflows).
+- `ffprobe` metadata (width/height/duration) is embedded in the `InputMediaVideo`
+  object on edits, same as on `sendVideo`.
 
 ### 0.10
 - **Fixed precedence:** `-c`/`-t` on the command line now really override

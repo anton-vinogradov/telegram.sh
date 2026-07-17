@@ -13,9 +13,11 @@
 #    You should have received a copy of the GNU General Public License
 #    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-VERSION="0.10"
+VERSION="0.11"
 TOKEN=""
 CHATS=()
+EDIT_TARGETS=()
+PRINT_MSG_ID=false
 DEBUG=false
 DRY_RUN=false
 
@@ -52,6 +54,12 @@ function help {
 	echo "OPTIONS are:"
 	echo "    -t <TOKEN>       Telegram bot token to use. See ENVIRONMENT for more information."
 	echo "    -c <CHAT_ID>     Chat to use as recipient. Can be given more than once. See ENVIRONMENT for more information."
+	echo "    -e <CHAT:MSGID>  Edit an existing message instead of sending a new one. Can be given more than once;"
+	echo "                     replaces -c recipients. With -V/-i/-f the message becomes that media (editMessageMedia -"
+	echo "                     this also turns a plain text message into a media message); with text only, the text is"
+	echo "                     replaced (editMessageText). Message text/caption comes from the message argument."
+	echo "    -I               After each successful send, print 'msgid <chat> <message_id>' to stdout, so callers"
+	echo "                     can edit the message later with -e."
 	echo "    -a <N>           Attempts per recipient (retries). Recipients are independent. Only transient failures"
 	echo "                     (network errors, HTTP 5xx, 429 rate-limit) are retried; permanent errors fail fast."
 	echo "                     429 'retry_after' is honored. Default: 1 (no retry)."
@@ -229,13 +237,19 @@ function check_file {
 	fi
 }
 
-while getopts ":pa:t:c:i:f:V:MHCrhlvjnRmDNT:" opt; do
+while getopts ":pa:t:c:e:i:f:V:MHCrhlvjnRmDINT:" opt; do
 	case $opt in
 		t)
 			TOKEN="$OPTARG"
 			;;
 		c)
 			CHATS+=("$OPTARG")
+			;;
+		e)
+			EDIT_TARGETS+=("$OPTARG")
+			;;
+		I)
+			PRINT_MSG_ID=true
 			;;
 		a)
 			RETRIES="$OPTARG"
@@ -313,6 +327,18 @@ if [ "$CRON_MODE" -eq 1 ] && [ "$CODE_MODE" -eq 1 ]; then
 	exit 1
 fi
 
+# -e targets are "chat_id:message_id" pairs (chat_id may be negative).
+EDIT_MODE=false
+if [ ${#EDIT_TARGETS[@]} -gt 0 ]; then
+	EDIT_MODE=true
+	for target in "${EDIT_TARGETS[@]}"; do
+		if ! [[ "$target" =~ ^-?[0-9]+:[0-9]+$ ]]; then
+			echo "Invalid -e target '$target' - expected <chat_id>:<message_id>."
+			exit 1
+		fi
+	done
+fi
+
 # Remember what came from the command line and the environment, so the
 # documented precedence survives sourcing the config files:
 #   config files < environment variables < command-line options.
@@ -356,7 +382,7 @@ if [ -z "$TOKEN" ]; then
 	exit 1
 fi
 
-if [ ${#CHATS[@]} -eq 0 ] && [ -z "$ACTION" ]; then
+if [ ${#CHATS[@]} -eq 0 ] && [ -z "$ACTION" ] && [ "$EDIT_MODE" != true ]; then
 	echo "No chat(s) given."
 	exit 1
 fi
@@ -449,6 +475,70 @@ function form_file_arg {
 	printf '%s=@"%s"' "$1" "$path"
 }
 
+# Minimal JSON string escaper for values embedded in InputMedia objects.
+function json_escape {
+	local s="$1"
+	s="${s//\\/\\\\}"
+	s="${s//\"/\\\"}"
+	s="${s//$'\n'/\\n}"
+	s="${s//$'\r'/\\r}"
+	s="${s//$'\t'/\\t}"
+	printf '%s' "$s"
+}
+
+# Probe video dimensions/duration with ffprobe (if available), so Telegram
+# shows the correct aspect ratio and a preview without probing the upload.
+#   Arg:  <video-file>   Sets: VW VH VDUR (empty when unknown)
+function probe_video {
+	VW=""; VH=""; VDUR=""
+	hash ffprobe 2>/dev/null || return 0
+	local dims vw vh vdur
+	dims=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height:format=duration -of default=nw=1:nk=1 "$1" 2>/dev/null | paste -sd' ' -)
+	read -r vw vh vdur _ <<< "$dims"
+	[[ "$vw"   =~ ^[0-9]+$ ]] && VW="$vw"
+	[[ "$vh"   =~ ^[0-9]+$ ]] && VH="$vh"
+	[[ "$vdur" =~ ^[0-9]+   ]] && VDUR="${vdur%%.*}"
+}
+
+if [ "$EDIT_MODE" = true ]; then
+	# Editing an existing message. With a file the message becomes that media
+	# (editMessageMedia also converts a plain text message into a media one);
+	# with text only, the text is replaced (editMessageText).
+	MEDIA_TYPE=""; MEDIA_FILE=""
+	if [ -n "$VIDEO_FILE" ]; then
+		check_file "$VIDEO_FILE"
+		MEDIA_TYPE="video"; MEDIA_FILE="$VIDEO_FILE"
+	elif [ -n "$IMAGE_FILE" ]; then
+		check_file "$IMAGE_FILE" 10
+		MEDIA_TYPE="photo"; MEDIA_FILE="$IMAGE_FILE"
+	elif [ -n "$DOCUMENT_FILE" ]; then
+		check_file "$DOCUMENT_FILE"
+		MEDIA_TYPE="document"; MEDIA_FILE="$DOCUMENT_FILE"
+	fi
+	if [ -n "$MEDIA_TYPE" ]; then
+		MEDIA_JSON="{\"type\":\"$MEDIA_TYPE\",\"media\":\"attach://tgfile\""
+		if [ "$MEDIA_TYPE" = "video" ]; then
+			MEDIA_JSON+=',"supports_streaming":true'
+			probe_video "$MEDIA_FILE"
+			[ -n "$VW" ]   && MEDIA_JSON+=",\"width\":$VW"
+			[ -n "$VH" ]   && MEDIA_JSON+=",\"height\":$VH"
+			[ -n "$VDUR" ] && MEDIA_JSON+=",\"duration\":$VDUR"
+		fi
+		[ -n "$TEXT" ]       && MEDIA_JSON+=",\"caption\":\"$(json_escape "$TEXT")\""
+		[ -n "$PARSE_MODE" ] && MEDIA_JSON+=",\"parse_mode\":\"$PARSE_MODE\""
+		MEDIA_JSON+="}"
+		CURL_ARGS+=(--form-string "media=$MEDIA_JSON")
+		CURL_ARGS+=(--form "$(form_file_arg tgfile "$MEDIA_FILE")")
+		METHOD="editMessageMedia"
+	else
+		CURL_ARGS+=(--form "text=<-")
+		[ -n "$PARSE_MODE" ] && CURL_ARGS+=(--form-string "parse_mode=$PARSE_MODE")
+		[ "$DISABLE_WEB_PAGE_PREVIEW" = true ] && CURL_ARGS+=(--form-string 'link_preview_options={"is_disabled":true}')
+		METHOD="editMessageText"
+	fi
+fi
+
+if [ "$EDIT_MODE" != true ]; then
 [ -n "$PARSE_MODE" ] && CURL_ARGS+=(--form-string "parse_mode=$PARSE_MODE")
 if [ -n "$DOCUMENT_FILE" ]; then
 	check_file "$DOCUMENT_FILE"
@@ -462,15 +552,10 @@ elif [ -n "$VIDEO_FILE" ]; then
 	CURL_ARGS+=(--form "$(form_file_arg video "$VIDEO_FILE")")
 	CURL_ARGS+=(--form "caption=<-")
 	CURL_ARGS+=(--form-string "supports_streaming=true")
-	# Provide width/height/duration when ffprobe is available, so Telegram shows
-	# the correct aspect ratio and a preview without having to probe the upload.
-	if hash ffprobe 2>/dev/null; then
-		vdims=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height:format=duration -of default=nw=1:nk=1 "$VIDEO_FILE" 2>/dev/null | paste -sd' ' -)
-		read -r vw vh vdur _ <<< "$vdims"
-		[[ "$vw"   =~ ^[0-9]+$ ]] && CURL_ARGS+=(--form-string "width=$vw")
-		[[ "$vh"   =~ ^[0-9]+$ ]] && CURL_ARGS+=(--form-string "height=$vh")
-		[[ "$vdur" =~ ^[0-9]+   ]] && CURL_ARGS+=(--form-string "duration=${vdur%%.*}")
-	fi
+	probe_video "$VIDEO_FILE"
+	[ -n "$VW" ]   && CURL_ARGS+=(--form-string "width=$VW")
+	[ -n "$VH" ]   && CURL_ARGS+=(--form-string "height=$VH")
+	[ -n "$VDUR" ] && CURL_ARGS+=(--form-string "duration=$VDUR")
 	METHOD="sendVideo"
 elif [ -n "$IMAGE_FILE" ]; then
 	check_file "$IMAGE_FILE" 10   # sendPhoto has a lower limit than documents/videos
@@ -483,9 +568,11 @@ else
 	METHOD="sendMessage"
 fi
 
+# Edits never trigger notifications, so this only applies to fresh sends.
 [ "$DISABLE_NOTIFICATION" = true ] && CURL_ARGS+=(--form-string "disable_notification=true")
+fi
 
-if [ "$METHOD" != "sendMessage" ] && [ ${#TEXT} -gt 1024 ]; then
+if [ "$METHOD" != "sendMessage" ] && [ "$METHOD" != "editMessageText" ] && [ ${#TEXT} -gt 1024 ]; then
 	echo "Warning: caption is ${#TEXT} characters, Telegram's limit is 1024 - the API will likely reject this message." >&2
 fi
 
@@ -534,13 +621,15 @@ evaluate_response() {
 }
 
 # Deliver the message to a single recipient, with retries.
-#   Arg:    <chat_id>
+#   Arg:    <chat_id>  (in edit mode: <chat_id>:<message_id>)
 #   Return: 0 if delivered, non-zero otherwise. Progress goes to stderr.
 send_to_chat() {
-	local id="$1" response status attempt=0 delay args
+	local id="$1" response status attempt=0 delay args mid
 	# shellcheck disable=SC2206 # CURL_OPTIONS is a user knob; word splitting is documented
 	args=($CURL_OPTIONS)
-	args+=("${CURL_ARGS[@]}" --form-string "chat_id=$id" "$URL$TOKEN/$METHOD")
+	args+=("${CURL_ARGS[@]}" --form-string "chat_id=${id%%:*}")
+	[ "$EDIT_MODE" = true ] && args+=(--form-string "message_id=${id##*:}")
+	args+=("$URL$TOKEN/$METHOD")
 	while [ "$attempt" -lt "$RETRIES" ]; do
 		attempt=$((attempt + 1))
 
@@ -556,7 +645,17 @@ send_to_chat() {
 		log "Response was: $response"
 		evaluate_response "$status" "$response"
 
-		[ -z "$SEND_ERROR" ] && return 0
+		if [ -z "$SEND_ERROR" ]; then
+			if [ "$PRINT_MSG_ID" = true ]; then
+				if [ "$HAS_JQ" = true ]; then
+					mid=$(jq -r '.result.message_id // empty' <<< "$response" 2>/dev/null)
+				else
+					mid=$(sed -n 's/.*"message_id":[[:space:]]*\([0-9]\{1,\}\).*/\1/p' <<< "$response" | head -n1)
+				fi
+				[ -n "$mid" ] && echo "msgid ${id%%:*} $mid"
+			fi
+			return 0
+		fi
 
 		if [ "$SEND_RETRYABLE" != true ]; then
 			echo "Chat $id: $SEND_ERROR - permanent, not retrying." >&2
@@ -574,21 +673,25 @@ send_to_chat() {
 	return 1
 }
 
+# In edit mode the recipients are the -e chat:message_id targets.
+RECIPIENTS=("${CHATS[@]}")
+[ "$EDIT_MODE" = true ] && RECIPIENTS=("${EDIT_TARGETS[@]}")
+
 FAILED_CHATS=()
 if [ "$PARALLEL" = true ] && [ "$DRY_RUN" != true ]; then
 	# Deliver to every recipient concurrently; collect per-chat exit codes.
 	results=$(mktemp -d)
 	trap 'rm -rf "$results"' EXIT
-	for id in "${CHATS[@]}"; do
+	for id in "${RECIPIENTS[@]}"; do
 		( send_to_chat "$id"; echo "$?" > "$results/$id" ) &
 	done
 	wait
-	for id in "${CHATS[@]}"; do
+	for id in "${RECIPIENTS[@]}"; do
 		[ "$(cat "$results/$id" 2>/dev/null)" = 0 ] || FAILED_CHATS+=("$id")
 	done
 	rm -rf "$results"
 else
-	for id in "${CHATS[@]}"; do
+	for id in "${RECIPIENTS[@]}"; do
 		send_to_chat "$id" || FAILED_CHATS+=("$id")
 	done
 fi
