@@ -81,6 +81,9 @@ telegram [options] [message]
 | `-c <CHAT_ID>` | Recipient chat. **Repeatable** — send to several chats at once. |
 | `-e <CHAT:MSGID>` | **Edit** an existing message instead of sending. Repeatable; replaces `-c`. With `-V`/`-i`/`-f` the message *becomes* that media (`editMessageMedia` — this also turns a plain text message into a media message); with text only, the text is replaced (`editMessageText`). |
 | `-I` | Print `msgid <chat> <message_id>` for every delivered message, so you can `-e` it later. |
+| `-q <DIR>` | **Queue on failure** (store-and-forward): recipients that still fail after all retries are written to `DIR` as queue files. See [Offline queue](#offline-queue). |
+| `-d <DIR>` | **Drain** a queue directory: replay every queued delivery (oldest first, under a lock). |
+| `-x <SECONDS>` | With `-d`: entries older than this expire — the message argument is delivered as an expiry notice instead. |
 | `-a <N>` | Attempts per recipient (**retries**). Recipients are independent. See [Retries](#retries--exit-code). |
 | `-p` | Deliver to all recipients **in parallel** (independently) instead of sequentially. |
 | `-f <FILE>` | Send a file. |
@@ -126,6 +129,33 @@ ultimately failed — convenient for scripting and monitoring.
 # Try each recipient up to 10 times, retrying only transient failures.
 telegram -c 111 -c 222 -a 10 -V event.mp4
 ```
+
+## Offline queue
+
+With `-q <dir>` a delivery that still fails after all retries is not lost: each
+failed recipient becomes a small queue file capturing the exact send (target,
+media file, text, parse mode — and the bot token, so **keep the directory
+private**, e.g. `chmod 700`). A later `telegram -d <dir>` run — typically from
+cron or a systemd timer — replays the queue oldest-first under a lock:
+
+- delivered or *permanently* rejected entries are removed;
+- *transient* failures (network down, 5xx, 429) stay for the next run;
+- with `-x <seconds>`, entries older than that expire: the message argument is
+  delivered instead as a best-effort notice (as an **edit** for
+  `<chat>:<message_id>` targets, as a plain message otherwise), and the entry
+  is dropped.
+
+```bash
+# Sender: queue anything that can't be delivered right now.
+telegram -c 1234 -a 3 -q /var/spool/telegram-queue -V clip.mp4
+
+# Cron / systemd timer, every couple of minutes:
+telegram -d /var/spool/telegram-queue -x 21600 "❌ delivery failed"
+```
+
+Combined with `-I`/`-e` this gives full store-and-forward for the
+placeholder-then-morph pattern: the placeholder is already in the chat, and the
+queued edit turns it into the real media as soon as the network returns.
 
 ## Configuration
 
@@ -214,6 +244,14 @@ docker run --rm telegram -t <TOKEN> -c <CHAT_ID> "Hello from Docker."
 ```
 
 ## Changelog
+
+### 0.12
+- **Offline queue (store-and-forward):** `-q <dir>` writes every recipient that
+  still fails after all retries into a queue directory; `-d <dir>` replays the
+  queue (oldest first, locked) — delivered/permanent entries are removed,
+  transient ones stay; `-x <seconds>` expires old entries by delivering the
+  message argument as a notice (edit for `chat:msgid` targets) and dropping
+  them. Queue files carry the bot token — keep the directory `chmod 700`.
 
 ### 0.11
 - **Editing messages:** new `-e <chat>:<message_id>` mode (repeatable, replaces

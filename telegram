@@ -13,11 +13,14 @@
 #    You should have received a copy of the GNU General Public License
 #    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-VERSION="0.11"
+VERSION="0.12"
 TOKEN=""
 CHATS=()
 EDIT_TARGETS=()
 PRINT_MSG_ID=false
+QUEUE_DIR=""
+DRAIN_DIR=""
+MAX_AGE=0
 DEBUG=false
 DRY_RUN=false
 
@@ -60,6 +63,15 @@ function help {
 	echo "                     replaced (editMessageText). Message text/caption comes from the message argument."
 	echo "    -I               After each successful send, print 'msgid <chat> <message_id>' to stdout, so callers"
 	echo "                     can edit the message later with -e."
+	echo "    -q <DIR>         Queue on failure (store-and-forward): recipients that still fail after all retries"
+	echo "                     are written to DIR as queue files (one per recipient, includes the token - keep DIR"
+	echo "                     private!). Deliver them later with -d."
+	echo "    -d <DIR>         Drain a queue directory: replay every queued delivery (oldest first, under a lock)."
+	echo "                     Delivered or permanently rejected entries are removed; transient failures stay for"
+	echo "                     the next run. Combine with -x. The message argument, if given, is the expiry notice."
+	echo "    -x <SECONDS>     With -d: entries older than this expire - the expiry notice (message argument) is"
+	echo "                     delivered best-effort (as an edit for <chat>:<msgid> targets, as a plain message"
+	echo "                     otherwise) and the entry is dropped."
 	echo "    -a <N>           Attempts per recipient (retries). Recipients are independent. Only transient failures"
 	echo "                     (network errors, HTTP 5xx, 429 rate-limit) are retried; permanent errors fail fast."
 	echo "                     429 'retry_after' is honored. Default: 1 (no retry)."
@@ -237,7 +249,7 @@ function check_file {
 	fi
 }
 
-while getopts ":pa:t:c:e:i:f:V:MHCrhlvjnRmDINT:" opt; do
+while getopts ":pa:t:c:e:i:f:V:q:d:x:MHCrhlvjnRmDINT:" opt; do
 	case $opt in
 		t)
 			TOKEN="$OPTARG"
@@ -250,6 +262,16 @@ while getopts ":pa:t:c:e:i:f:V:MHCrhlvjnRmDINT:" opt; do
 			;;
 		I)
 			PRINT_MSG_ID=true
+			;;
+		q)
+			QUEUE_DIR="$OPTARG"
+			;;
+		d)
+			ACTION="drain"
+			DRAIN_DIR="$OPTARG"
+			;;
+		x)
+			MAX_AGE="$OPTARG"
 			;;
 		a)
 			RETRIES="$OPTARG"
@@ -377,7 +399,8 @@ log "CHATS is now ${CHATS[*]}"
 log "DISABLE_WEB_PAGE_PREVIEW is now $DISABLE_WEB_PAGE_PREVIEW"
 log "DISABLE_NOTIFICATION is now $DISABLE_NOTIFICATION"
 
-if [ -z "$TOKEN" ]; then
+# Drain mode needs no token/chats of its own: every queue entry carries them.
+if [ -z "$TOKEN" ] && [ "$ACTION" != "drain" ]; then
 	echo "No bot token was given."
 	exit 1
 fi
@@ -441,7 +464,7 @@ if [ -n "$TITLE" ]; then
 	fi
 fi
 
-if [ -z "$TEXT" ] && [ -z "$DOCUMENT_FILE" ] && [ -z "$VIDEO_FILE" ] && [ -z "$IMAGE_FILE" ] ; then
+if [ -z "$TEXT" ] && [ -z "$DOCUMENT_FILE" ] && [ -z "$VIDEO_FILE" ] && [ -z "$IMAGE_FILE" ] && [ "$ACTION" != "drain" ]; then
 	echo "Neither text nor a file, image or video was given."
 	exit 1
 fi
@@ -673,6 +696,100 @@ send_to_chat() {
 	return 1
 }
 
+# Write one queue file per failed recipient, so a later `-d <dir>` run can
+# replay the exact delivery. Files carry the token - keep the directory private.
+queue_failed() {
+	local qtype=text qfile="" text_b64 id tmp
+	if   [ -n "$VIDEO_FILE" ];    then qtype=video;    qfile=$(realpath "$VIDEO_FILE")
+	elif [ -n "$IMAGE_FILE" ];    then qtype=photo;    qfile=$(realpath "$IMAGE_FILE")
+	elif [ -n "$DOCUMENT_FILE" ]; then qtype=document; qfile=$(realpath "$DOCUMENT_FILE")
+	fi
+	text_b64=$(printf '%s' "$TEXT" | base64 | tr -d '\n')
+	[ -d "$QUEUE_DIR" ] || install -d -m 700 "$QUEUE_DIR" 2>/dev/null || { echo "Cannot create queue dir $QUEUE_DIR" >&2; return 1; }
+	for id in "${FAILED_CHATS[@]}"; do
+		tmp=$(mktemp "$QUEUE_DIR/.qtmp.XXXXXX") || continue
+		{
+			echo "token=$TOKEN"
+			echo "target=$id"
+			echo "type=$qtype"
+			echo "file=$qfile"
+			echo "text=$text_b64"
+			echo "parse_mode=$PARSE_MODE"
+			echo "created=$(date +%s)"
+		} > "$tmp"
+		mv "$tmp" "$QUEUE_DIR/q-$(date +%s)-$$-$RANDOM.msg"
+	done
+	echo "Queued ${#FAILED_CHATS[@]} failed delivery(s) in $QUEUE_DIR" >&2
+}
+
+qfield() { sed -n "s/^$1=//p" "$2" | head -n1; }
+
+# Replay queued deliveries (oldest first, under a lock). Each entry is retried
+# via a fresh invocation of this script, so all send/edit logic is reused.
+# Delivered or permanently rejected entries are removed; transient failures
+# stay for the next run. Entries older than MAX_AGE expire: the expiry notice
+# (TEXT) is delivered best-effort and the entry is dropped.
+drain_queue() {
+	if [ ! -d "$DRAIN_DIR" ]; then
+		echo "Queue dir $DRAIN_DIR does not exist."
+		return 1
+	fi
+	exec 9>"$DRAIN_DIR/.drain.lock"
+	if hash flock 2>/dev/null; then
+		flock -n 9 || return 0   # another drain is already running
+	fi
+	[[ "$MAX_AGE" =~ ^[0-9]+$ ]] || MAX_AGE=0
+
+	local qf token target qtype qfile text pm created age now args out rc
+	shopt -s nullglob
+	for qf in "$DRAIN_DIR"/q-*.msg; do
+		token=$(qfield token "$qf"); target=$(qfield target "$qf")
+		qtype=$(qfield type "$qf");  qfile=$(qfield file "$qf")
+		text=$(qfield text "$qf" | base64 -d 2>/dev/null)
+		pm=$(qfield parse_mode "$qf"); created=$(qfield created "$qf")
+		if ! [[ "$token" =~ ^[0-9]+:[A-Za-z0-9_-]+$ && ( "$target" =~ ^-?[0-9]+$ || "$target" =~ ^-?[0-9]+:[0-9]+$ ) ]]; then
+			echo "Dropping malformed queue entry $(basename "$qf")." >&2
+			rm -f "$qf"; continue
+		fi
+		[[ "$created" =~ ^[0-9]+$ ]] || created=0
+
+		# target determines delivery style: chat:msgid -> edit, plain chat -> send
+		if [[ "$target" == *:* ]]; then args=(-e "$target"); else args=(-c "$target"); fi
+		case "$pm" in Markdown) args+=(-M);; HTML) args+=(-H);; esac
+
+		now=$(date +%s); age=$((now - created))
+		if [ "$MAX_AGE" -gt 0 ] && [ "$age" -gt "$MAX_AGE" ]; then
+			# Expired: deliver the notice instead of the payload, best effort.
+			[ -n "$TEXT" ] && "$0" -t "$token" "${args[@]}" -a 1 "$TEXT" >/dev/null 2>&1
+			echo "Expired queue entry $(basename "$qf") (age ${age}s > ${MAX_AGE}s)." >&2
+			rm -f "$qf"; continue
+		fi
+
+		args=(-t "$token" -a "$RETRIES" "${args[@]}")
+		case "$qtype" in
+			video)    args+=(-V "$qfile");;
+			photo)    args+=(-i "$qfile");;
+			document) args+=(-f "$qfile");;
+		esac
+		[ -n "$text" ] && args+=("$text")
+
+		out=$("$0" "${args[@]}" 2>&1); rc=$?
+		if [ "$rc" -eq 0 ]; then
+			rm -f "$qf"
+		elif grep -qE "permanent, not retrying|does not exist|Invalid" <<< "$out"; then
+			echo "Dropping queue entry $(basename "$qf"): $out" >&2
+			rm -f "$qf"
+		fi
+		# transient failure: keep the entry for the next drain run
+	done
+	return 0
+}
+
+if [ "$ACTION" = "drain" ]; then
+	drain_queue
+	exit $?
+fi
+
 # In edit mode the recipients are the -e chat:message_id targets.
 RECIPIENTS=("${CHATS[@]}")
 [ "$EDIT_MODE" = true ] && RECIPIENTS=("${EDIT_TARGETS[@]}")
@@ -698,5 +815,6 @@ fi
 
 if [ ${#FAILED_CHATS[@]} -gt 0 ]; then
 	echo "Failed to deliver to: ${FAILED_CHATS[*]}" >&2
+	[ -n "$QUEUE_DIR" ] && queue_failed
 	exit 1
 fi

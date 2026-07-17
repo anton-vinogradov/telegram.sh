@@ -107,6 +107,20 @@ t "-e works without -c"                     0 "!No chat(s)" -- ./telegram -t T -
 t "-e bad target rejected"                  1 "Invalid -e target" -- ./telegram -t T -n -e nonsense -V "my file.txt" cap
 t "-I flag accepted"                        0 - -- ./telegram -t T -c 1 -n -I hi
 
+### Offline queue (-q) and drain (-d) #########################################
+# Point the script at an unreachable API so sends fail fast (transient error).
+printf 'URL="http://127.0.0.1:9/bot"\nCURL_OPTIONS="-s --connect-timeout 1 --max-time 2"\n' > .telegram.sh.conf
+
+t "failed send is queued with -q"           1 "Queued 1 failed" -- ./telegram -t 12:AB -c 111 -q qdir "hello queue"
+t "queue file exists"                       0 "q-" -- bash -c 'ls qdir'
+t "queue file stores target"                0 "target=111" -- bash -c 'cat qdir/q-*.msg'
+t "queue file stores base64 text"           0 "text=$(printf hello\ queue | base64)" -- bash -c 'cat qdir/q-*.msg'
+t "drain keeps transient failure"           0 "q-" -- bash -c './telegram -d qdir >/dev/null 2>&1; ls qdir'
+t "drain expires old entries"               0 "!q-" -- bash -c 'sed -i.bak "s/^created=.*/created=1/" qdir/q-*.msg && rm -f qdir/*.bak; ./telegram -d qdir -x 10 "expired" >/dev/null 2>&1; ls qdir'
+t "drain drops malformed entry"             0 "!q-" -- bash -c 'printf "token=zzz\ntarget=bad\n" > qdir/q-1-1-1.msg; ./telegram -d qdir >/dev/null 2>&1; ls qdir'
+t "drain of missing dir fails"              1 "does not exist" -- ./telegram -d no-such-dir
+rm -rf qdir .telegram.sh.conf
+
 ### Size limits ###############################################################
 dd if=/dev/zero of=big.bin bs=1024 count=11264 2>/dev/null
 
