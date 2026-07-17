@@ -207,33 +207,137 @@ See the curl documentation for the supported proxy protocols.
 
 ## Examples
 
+Every option, grouped by task. `TOKEN`/`CHAT_ID` are assumed to come from a
+config file or the environment (see [Configuration](#configuration)) unless
+`-t`/`-c` are shown explicitly.
+
+### Sending text
+
 ```bash
-# Message from token + chat id.
+# Explicit token and chat id (-t, -c) - override config and environment.
 telegram -t 123456:AbcDefGhi-JklMnoPrw -c 12345 "Hello, World."
+
+# Several recipients at once - repeat -c.
+telegram -c 1234 -c 6789 "Hello, Planets."
 
 # Multi-line message.
 telegram "Hello,"$'\n'"World."
-echo -e "Hello\nWorld." | telegram -
 
-# Send to multiple chats at once.
-telegram -c 1234 -c 6789 "Hello, Planets."
+# Read the message from stdin ('-' as the message).
+echo "Hello from a pipe." | telegram -
 
-# Pipe command output (sent as monospace code).
-ls -l | telegram -
+# Silent delivery (-N) - the client gets the message without a sound.
+telegram -N "3am cron finished, don't wake anyone."
+```
 
-# Markdown (HTML is available via -H).
+### Formatting
+
+```bash
+# Markdown (-M) and HTML (-H) parsing.
 telegram -M "To *boldly* go, where _no man_ has gone before."
+telegram -H "To <b>boldly</b> go, where <i>no man</i> has gone before."
 
-# Send a file, an image, or a video.
+# Title above the message (-T; printed bold with -M or -H).
+telegram -M -T "Backup report" "Everything is fine."
+
+# Send piped command output as monospace code (-C).
+df -h | telegram -C -
+
+# Cron mode (-r): like -C, but exits silently unless the input contains
+# a line starting with '+ ' (e.g. 'sh -x' traces) - keeps quiet crons quiet.
+make deploy 2>&1 | telegram -r -
+
+# Don't unfurl links into previews (-D; text messages only).
+telegram -D "Docs: https://example.com/very/loud/page"
+```
+
+### Files, images, video
+
+```bash
+# Document (-f, max 50MB) with a caption.
 telegram -f results.txt "Here are the results."
-telegram -i solar_system.png
-telegram -V clip.mp4
 
-# Instant placeholder, then morph it into the video when it's ready:
-# send a short text and remember its message id...
-telegram -I -c 1234 "recording..."        # prints: msgid 1234 567
-# ...later, replace that very message with the video (text -> video).
-telegram -e 1234:567 -V clip.mp4 "here it is"
+# Photo (-i, max 10MB) - caption optional.
+telegram -i solar_system.png "The neighbourhood."
+
+# Video (-V, max 50MB). Streams inline; width/height/duration are probed
+# with ffprobe when available, so the preview and aspect ratio are right.
+telegram -V clip.mp4 "Look what the cat did."
+```
+
+### Retries and parallel delivery
+
+```bash
+# Up to 5 attempts per recipient (-a). Only transient failures are retried
+# (network errors, HTTP 5xx, 429 - retry_after is honored); permanent ones
+# (bad token, blocked bot, ...) fail immediately without retrying.
+telegram -a 5 "Important."
+
+# Deliver to all recipients in parallel and independently (-p):
+# one broken chat doesn't delay or block the others.
+telegram -c 1234 -c 6789 -a 5 -p -V clip.mp4 "For both of you."
+
+# Exit code is 0 only if EVERY recipient got the message; failed chats are
+# listed on stderr as "Failed to deliver to: <ids>".
+```
+
+### Editing messages (placeholder → morph)
+
+```bash
+# -I prints 'msgid <chat> <message_id>' for every delivered message,
+# so you can address it later with -e.
+telegram -I -c 1234 "recording..."          # -> msgid 1234 567
+
+# Replace the text of that very message (editMessageText).
+telegram -e 1234:567 "still recording..."
+
+# Turn the SAME message into a photo (editMessageMedia - yes, a plain
+# text message becomes a media message in place).
+telegram -e 1234:567 -i first_frame.jpg "10:42:07"
+
+# ...and finally into the video (no caption - the media replaces it all).
+# -e is repeatable; retries (-a) and parallelism (-p) work as for sends.
+telegram -e 1234:567 -e 6789:890 -p -a 3 -V clip.mp4
+```
+
+### Offline queue (store-and-forward)
+
+```bash
+# Queue on failure (-q): recipients that still fail after all retries are
+# stored as queue files (they contain the token - chmod 700 the dir!).
+telegram -c 1234 -a 3 -q /var/spool/tg-queue -V clip.mp4
+
+# Drain the queue (-d) from cron or a systemd timer, every few minutes:
+# replays entries oldest-first under a lock; delivered and permanently
+# rejected entries are removed, transient failures stay for the next run.
+telegram -d /var/spool/tg-queue
+
+# Same, with expiry (-x): entries older than 6h are dropped after
+# delivering the notice instead (an edit for chat:msgid targets,
+# a plain message for chat targets).
+telegram -d /var/spool/tg-queue -x 21600 "❌ delivery failed"
+```
+
+### Discovering chats, receiving
+
+```bash
+# Which chats can the bot see? (Message the bot first, then:)
+telegram -l
+
+# Print the last message sent to the bot.
+telegram -m            # -> <Message ID> <Sender ID> <Chat ID> <Text>
+
+# Download the last file sent to the bot into the current directory.
+telegram -R
+```
+
+### Debugging
+
+```bash
+telegram -v "Verbose run."   # log every step (the token is masked)
+telegram -n "Dry run."       # print the curl invocation, send nothing
+telegram -j "No jq."         # pretend jq is absent (exercise fallbacks)
+telegram -h                  # full usage
 ```
 
 ## Docker
